@@ -15,10 +15,9 @@ namespace ExileCore
         private static readonly Dictionary<string, DebugMsgDescription> Messages;
         private static readonly List<DebugMsgDescription> MessagesList;
         private static readonly Queue<string> toDelete;
-        private static readonly Queue<DebugMsgDescription> LogHistory;
         private static readonly CircularBuffer<DebugMsgDescription> History;
-        private readonly Graphics graphics;
-        private readonly CoreSettings settingsCoreSettings;
+        private readonly Graphics _graphics;
+        private readonly CoreSettings _coreSettings;
         private Vector2 position;
 
         static DebugWindow()
@@ -26,14 +25,13 @@ namespace ExileCore
             Messages = new Dictionary<string, DebugMsgDescription>(24);
             MessagesList = new List<DebugMsgDescription>(24);
             toDelete = new Queue<string>(24);
-            LogHistory = new Queue<DebugMsgDescription>(1024);
-            History = new CircularBuffer<DebugMsgDescription>(1024);
+            History = new CircularBuffer<DebugMsgDescription>(4096);
         }
 
-        public DebugWindow(Graphics graphics, CoreSettings settingsCoreSettings)
+        public DebugWindow(Graphics graphics, CoreSettings coreSettings)
         {
-            this.graphics = graphics;
-            this.settingsCoreSettings = settingsCoreSettings;
+            this._graphics = graphics;
+            this._coreSettings = coreSettings;
             graphics.InitImage("menu-background.png");
         }
 
@@ -41,21 +39,24 @@ namespace ExileCore
         {
             try
             {
-                if (settingsCoreSettings.ShowDebugLog)
+                if (_coreSettings.ShowDebugLog)
                 {
                     unsafe
                     {
-                        ImGui.PushFont(graphics.Font.Atlas);
+                        ImGui.PushFont(_graphics.Font.Atlas);
                     }
 
                     ImGui.SetNextWindowPos(new Vector2(10, 10), ImGuiCond.Appearing);
                     ImGui.SetNextWindowSize(new Vector2(600, 1000), ImGuiCond.Appearing);
-                    var openedWindow = settingsCoreSettings.ShowDebugLog.Value;
+                    var openedWindow = _coreSettings.ShowDebugLog.Value;
                     ImGui.Begin("Debug log",ref openedWindow);
-                    settingsCoreSettings.ShowDebugLog.Value = openedWindow;
+                    _coreSettings.ShowDebugLog.Value = openedWindow;
                     foreach (var msg in History)
                     {
                         if (msg == null) continue;
+                        if (msg.MsgType == MsgType.Debug && !_coreSettings.ShowDebugMessages.Value) continue;
+                        if (msg.MsgType == MsgType.Error && !_coreSettings.ShowErrorMessages.Value) continue;
+                        if (msg.MsgType == MsgType.Message && !_coreSettings.ShowInformationMessages.Value) continue;
                         ImGui.PushStyleColor(ImGuiCol.Text, msg.ColorV4);
                         ImGui.TextUnformatted($"{msg.Time.ToLongTimeString()}: {msg.Msg}");
                         ImGui.PopStyleColor();
@@ -80,12 +81,13 @@ namespace ExileCore
                         continue;
                     }
 
+                    if (message.MsgType == MsgType.Debug && !_coreSettings.ShowDebugMessages.Value) continue;
                     var draw = message.Msg;
                     if (message.Count > 1) draw = $"({message.Count}){draw}";
 
-                    var currentPosition = graphics.DrawText(draw, position, message.Color);
+                    var currentPosition = _graphics.DrawText(draw, position, message.Color);
 
-                    graphics.DrawImage("menu-background.png",
+                    _graphics.DrawImage("menu-background.png",
                         new RectangleF(position.X - 5, position.Y, currentPosition.X + 20, currentPosition.Y));
 
                     position = new Vector2(position.X, position.Y + currentPosition.Y);
@@ -98,22 +100,25 @@ namespace ExileCore
                     if (Messages.TryGetValue(delete, out var debugMsgDescription))
                     {
                         MessagesList.Remove(debugMsgDescription);
-                        LogHistory.Enqueue(debugMsgDescription);
-                        History.PushBack(debugMsgDescription);
 
-                        if (debugMsgDescription.Color == Color.Red)
-                            Core.Logger.Error($"{debugMsgDescription.Msg}");
-                        else
-                            Core.Logger.Information($"{debugMsgDescription.Msg}");
+                        switch (debugMsgDescription.MsgType)
+                        {
+                            case MsgType.Message:
+                                Core.Logger.Information($"{debugMsgDescription.Msg}");
+                                break;
+                            case MsgType.Error:
+                                Core.Logger.Error($"{debugMsgDescription.Msg}");
+                                break;
+                            case MsgType.Debug:
+                                Core.Logger.Verbose($"{debugMsgDescription.Msg}");
+                                break;
+                            default:
+                                Core.Logger.Verbose($"THIS SHOULD NOT BE LOGGED! {debugMsgDescription.Msg}");
+                                break;
+                        }
                     }
 
                     Messages.Remove(delete);
-
-                    if (LogHistory.Count >= 1024)
-                        for (var i = 0; i < 24; i++)
-                        {
-                            LogHistory.Dequeue();
-                        }
                 }
             }
             catch (Exception e)
@@ -124,12 +129,7 @@ namespace ExileCore
 
         public static void LogMsg(string msg)
         {
-            LogMsg(msg, 1f, Color.White);
-        }
-
-        public static void LogError(string msg, float time = 2f)
-        {
-            LogMsg(msg, time, Color.Red);
+            LogMsg(msg, 1f);
         }
 
         public static void LogMsg(string msg, float time)
@@ -139,6 +139,21 @@ namespace ExileCore
 
         public static void LogMsg(string msg, float time, Color color)
         {
+            LogMsg(msg, time, color, MsgType.Message);
+        }
+
+        public static void LogError(string msg, float time = 2f)
+        {
+            LogMsg(msg, time, Color.Red, MsgType.Error);
+        }
+
+        public static void LogDebug(string msg, float time = 2f)
+        {
+            LogMsg(msg, time, Color.LightBlue, MsgType.Debug);
+        }
+
+        public static void LogMsg(string msg, float time, Color color, MsgType msgType)
+        {
             try
             {
                 if (Messages.TryGetValue(msg, out var result))
@@ -146,11 +161,13 @@ namespace ExileCore
                     result.Time = DateTime.UtcNow.AddSeconds(time);
                     result.Color = color;
                     result.Count++;
+                    History.PushBack(result);
                 }
                 else
                 {
                     result = new DebugMsgDescription
                     {
+                        MsgType = msgType,
                         Msg = msg,
                         Time = DateTime.UtcNow.AddSeconds(time),
                         ColorV4 = color.ToImguiVec4(),
@@ -162,6 +179,7 @@ namespace ExileCore
                     {
                         Messages[msg] = result;
                         MessagesList.Add(result);
+                        History.PushBack(result);
                     }
                 }
             }
@@ -174,10 +192,18 @@ namespace ExileCore
 
     public class DebugMsgDescription
     {
+        public MsgType MsgType { get; set; }
         public string Msg { get; set; }
         public DateTime Time { get; set; }
         public Vector4 ColorV4 { get; set; }
         public Color Color { get; set; }
         public int Count { get; set; }
+    }
+
+    public enum MsgType
+    {
+        Message,
+        Error,
+        Debug
     }
 }

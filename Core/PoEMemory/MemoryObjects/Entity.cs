@@ -276,6 +276,15 @@ namespace ExileCore.PoEMemory.MemoryObjects
             }
         }
 
+        public bool IsTransitioned => IsTransitionedHelper();
+        private bool IsTransitionedHelper()
+        {
+            var transitionable = GetComponent<Transitionable>();
+            var flag = transitionable?.Flag1; //1, 2
+            if (!flag.HasValue) return false;
+            return flag.Value == 2;
+        }
+
         public List<Buff> Buffs => buffCache.Value;
         private string CachePath { get; set; }
 
@@ -686,8 +695,10 @@ namespace ExileCore.PoEMemory.MemoryObjects
             {
                 if (Path.StartsWith("Metadata/Monsters/LegionLeague/", StringComparison.Ordinal))
                     League = LeagueType.Legion;
-
-                return EntityType.Monster;
+				if (Path.StartsWith("Metadata/Monsters/LeagueAffliction/", StringComparison.Ordinal))
+					League = LeagueType.Delirium;
+	
+				return EntityType.Monster;
             }
 
             if (HasComponent<Shrine>())

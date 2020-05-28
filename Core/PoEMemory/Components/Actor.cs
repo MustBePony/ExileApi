@@ -98,7 +98,7 @@ namespace ExileCore.PoEMemory.Components
             }
         }
 
-        /*public List<ActorVaalSkill> ActorVaalSkills
+        public List<ActorVaalSkill> ActorVaalSkills
         {
             get
             {
@@ -110,14 +110,14 @@ namespace ExileCore.PoEMemory.Components
                 var result = new List<ActorVaalSkill>();
                 for (var addr = skillsStartPointer; addr < skillsEndPointer; addr += ACTOR_VAAL_SKILLS_SIZE)
                 {
-                    result.Add(ReadObject<ActorVaalSkill>(addr));
+                    result.Add(GetObject<ActorVaalSkill>(addr));
                     if (stuckCounter++ > 50)
                         return new List<ActorVaalSkill>();
                 }
 
                 return result;
             }
-        }*/
+        }
 
         public class ActionWrapper : RemoteMemoryObject
         {

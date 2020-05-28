@@ -46,11 +46,9 @@ namespace ExileCore.RenderQ
         private DepthStencilState depthStencilState;
         private readonly string LastFontName = "";
         private Matrix4x4 mvp2;
-        private RawColor4 outputMergerBlendFactor;
         private SamplerState samplerState;
         private RasterizerState SolidState;
         private VertexBufferBinding vertexBuffer;
-        private Viewport Viewport;
 
         public ImGuiRender(DX11 dx11, RenderForm form, CoreSettings coreSettings)
         {
@@ -355,7 +353,7 @@ namespace ExileCore.RenderQ
                     }
                     catch (Exception e)
                     {
-                        Core.Logger.Error($"Cant load fonts -> {e}");
+                        DebugWindow.LogError($"Cant load fonts -> {e}");
                     }
                 }
 
@@ -370,6 +368,7 @@ namespace ExileCore.RenderQ
             }
             catch (DllNotFoundException ex)
             {
+                DebugWindow.LogError($"Cant load cimgui.dll -> {ex.Message}");
                 throw new DllNotFoundException("Need put in directory cimgui.dll");
             }
         }
@@ -416,6 +415,17 @@ namespace ExileCore.RenderQ
             if (fonts.Count > 0) lastFontContainer = fonts.First().Value;
 
             CoreSettings.Font.Values = new List<string>(fonts.Keys);
+            if (CoreSettings.Font.Value == null) 
+            {
+                try
+                {
+                    CoreSettings.Font.Value = CoreSettings.Font.Values.First();
+                } 
+                catch (Exception e)
+                {
+                    DebugWindow.LogError($"ImGuiRender -> fonts not found, Exception: {e}");
+                }
+            }
         }
 
         private void SetTexture(ShaderResourceView fontTexture)
@@ -513,7 +523,7 @@ namespace ExileCore.RenderQ
 
                 if (fontName == null)
                 {
-                    if (fonts.TryGetValue(CoreSettings.Font.Value, out var fontN))
+                    if (fonts.TryGetValue(CoreSettings.Font?.Value, out var fontN))
                     {
                         fontContainer = fontN;
                         fontName = CoreSettings.Font.Value;
@@ -679,9 +689,17 @@ namespace ExileCore.RenderQ
             return position;
         }
 
-        private unsafe Vector2N DrawClrText2(ref ReadOnlySpan<char> span, ref Vector2N position, float xStart, FontAlign align,
-            int start, int len,
-            uint clr, int index, int spanIndex, bool noColor = false)
+        private unsafe Vector2N DrawClrText2(
+            ref ReadOnlySpan<char> span, 
+            ref Vector2N position, 
+            float xStart, 
+            FontAlign align,
+            int start, 
+            int len,
+            uint clr, 
+            int index, 
+            int spanIndex, 
+            bool noColor = false)
         {
             var onlySpan = span.Slice(start, len);
             var textBegin = onlySpan.ToString();

@@ -5,11 +5,13 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Reflection.Emit;
 using System.Threading;
 using System.Threading.Tasks;
 using ExileCore.PoEMemory.MemoryObjects;
 using ExileCore.Shared.Helpers;
 using ExileCore.Shared.Interfaces;
+using ExileCore.Shared.PluginAutoUpdate;
 using JM.LinqFaster;
 using Microsoft.CodeDom.Providers.DotNetCompilerPlatform;
 using MoreLinq.Extensions;
@@ -22,21 +24,24 @@ namespace ExileCore.Shared
         private const string PluginsDirectory = "Plugins";
         private const string CompiledPluginsDirectory = "Compiled";
         private const string SourcePluginsDirectory = "Source";
+        private string AutoPluginUpdateSettingsPath => Path.Combine(PluginsDirectory, "updateSettings.json");
         private readonly GameController _gameController;
         private readonly Graphics _graphics;
         private readonly MultiThreadManager _multiThreadManager;
-        private readonly Dictionary<string, string> Directories = new Dictionary<string, string>();
-        private  Dictionary<string, Stopwatch> PluginLoadTime { get; } = new Dictionary<string, Stopwatch>();
-        private bool parallelLoading = false;
 
-        object locker = new object();
+        private Dictionary<string, string> Directories { get; }
+        public bool AllPluginsLoaded { get; private set; }
+        public string RootDirectory { get; }
+        public List<PluginWrapper> Plugins { get; private set; }
+
         public PluginManager(GameController gameController, Graphics graphics, MultiThreadManager multiThreadManager)
         {
             _gameController = gameController;
             _graphics = graphics;
             _multiThreadManager = multiThreadManager;
+            Plugins = new List<PluginWrapper>();
+            Directories = new Dictionary<string, string>();
             RootDirectory = AppDomain.CurrentDomain.BaseDirectory;
-            Directories["Temp"] = Path.Combine(RootDirectory, PluginsDirectory, "Temp");
             Directories[PluginsDirectory] = Path.Combine(RootDirectory, PluginsDirectory);
 
             Directories[CompiledPluginsDirectory] =
@@ -49,7 +54,6 @@ namespace ExileCore.Shared
             _gameController.EntityListWrapper.EntityIgnored += EntityListWrapperOnEntityIgnored;
             _gameController.Area.OnAreaChange += AreaOnOnAreaChange;
 
-            parallelLoading = _gameController.Settings.CoreSettings.MultiThreadLoadPlugins;
 
             foreach (var directory in Directories)
             {
@@ -60,41 +64,79 @@ namespace ExileCore.Shared
                 }
             }
 
-            var (compiledPlugins, sourcePlugins) = SearchPlugins();
-            List<(Assembly asm, DirectoryInfo directoryInfo)> assemblies = new List<(Assembly, DirectoryInfo)>();
+            Task.Run(() => LoadPlugins(gameController));
+        }
 
-            Task task = null;
-            if (sourcePlugins.Length > 0)
+        private void LoadPlugins(GameController gameController)
+        {
+            var pluginLoader = new PluginLoader(_gameController, _graphics, this);
+
+            var pluginUpdateSettings = SettingsContainer.LoadSettingFile<PluginsUpdateSettings>(AutoPluginUpdateSettingsPath);
+
+            var loadPluginTasks = new List<Task<List<PluginWrapper>>>();
+            if (pluginUpdateSettings != null)
             {
-                task = Task.Run(() =>
-                {
-                    var compilePluginsFromSource = CompilePluginsFromSource(sourcePlugins);
-                });
+                loadPluginTasks.AddRange(RunPluginAutoUpdate(pluginLoader, pluginUpdateSettings));
             }
-            
+            loadPluginTasks.AddRange(LoadCompiledDirPlugins(pluginLoader, pluginUpdateSettings));
 
-            var compiledAssemblies = GetCompiledAssemblies(compiledPlugins, parallelLoading);
-           
-            var devTree = Plugins.FirstOrDefault(x=>x.Name.Equals("DevTree"));
-            task?.Wait();
-            Plugins = Plugins.OrderBy(x => x.Order).ThenByDescending(x => x.CanBeMultiThreading).ThenBy(x => x.Name)
+            Task.WaitAll(loadPluginTasks?.ToArray());
+
+            Plugins = loadPluginTasks
+                .Where(t => t.Result != null)
+                .SelectMany(t => t.Result)
+                .OrderBy(x => x.Order)
+                .ThenByDescending(x => x.CanBeMultiThreading)
+                .ThenBy(x => x.Name)
                 .ToList();
 
-            if (devTree != null)
+            AddPluginInfoToDevTree();
+
+            InitialisePlugins(gameController);
+
+            AreaOnOnAreaChange(gameController.Area.CurrentArea);
+            AllPluginsLoaded = true;
+        }
+
+        private List<Task<List<PluginWrapper>>> RunPluginAutoUpdate(PluginLoader pluginLoader, PluginsUpdateSettings pluginsUpdateSettings)
+        {
+            var pluginUpdater = new PluginUpdater(
+                pluginsUpdateSettings,
+                RootDirectory,
+                Directories[CompiledPluginsDirectory],
+                Directories[SourcePluginsDirectory],
+                pluginLoader
+                );
+
+            var pluginTasks = pluginUpdater.UpdateAndLoadAllAsync();
+            return pluginTasks;
+        }
+
+        private List<Task<List<PluginWrapper>>> LoadCompiledDirPlugins(PluginLoader pluginLoader, PluginsUpdateSettings pluginsUpdateSettings)
+        {
+            List<string> excludedNames = new List<string>();
+            if (pluginsUpdateSettings != null && pluginsUpdateSettings.Enable)
             {
-                try
-                {
-                    var fieldInfo = devTree.Plugin.GetType().GetField("Plugins");
-                    List<PluginWrapper> devTreePlugins() => Plugins;
-                    fieldInfo.SetValue(devTree.Plugin,(Func<List<PluginWrapper>>) devTreePlugins);
-                } 
-                catch (Exception e)
-                {
-                    LogError(e.ToString());
-                }
-                
+                var excluded = pluginsUpdateSettings.Plugins?
+                    .Where(p => p.Enable)
+                    .Select(p => p.Name?.Value);
+                excludedNames.AddRange(excluded);
             }
-            if (parallelLoading)
+            var compiledDirectories = new DirectoryInfo(Directories[CompiledPluginsDirectory])
+                .GetDirectories()
+                .Where(di => !excludedNames.Any(excludedName => excludedName.Equals(di.Name, StringComparison.InvariantCultureIgnoreCase)));
+
+            var loadTasks = new List<Task<List<PluginWrapper>>>();
+            foreach (var compiledDirectory in compiledDirectories)
+            {
+                loadTasks.Add(Task.Run(() => pluginLoader.Load(compiledDirectory)));
+            }
+            return loadTasks;
+        }
+
+        private void InitialisePlugins(GameController gameController)
+        {
+            if (_gameController.Settings.CoreSettings.MultiThreadLoadPlugins)
             {
                 //Pre init some general objects because with multi threading load they can null sometimes for some plugin
                 var ingameStateIngameUi = gameController.IngameState.IngameUi;
@@ -103,400 +145,29 @@ namespace ExileCore.Shared
                 Parallel.ForEach(Plugins, wrapper => wrapper.Initialise(gameController));
             }
             else
+            {
                 Plugins.ForEach(wrapper => wrapper.Initialise(gameController));
-
-            AreaOnOnAreaChange(gameController.Area.CurrentArea);
-            Plugins.ForEach(x=> x.SubscrideOnFile(HotReloadDll));
-            AllPluginsLoaded = true;
-        }
-
-        public bool AllPluginsLoaded { get; }
-        public string RootDirectory { get; }
-        public List<PluginWrapper> Plugins { get; } = new List<PluginWrapper>();
-
-        private List<(Assembly loadedAssembly, DirectoryInfo directoryInfoinfo)> GetCompiledAssemblies(DirectoryInfo[] compiledPlugins, bool parallel)
-        {
-             object lockerLoadAsm = new object();
-            var results = new List<(Assembly loadedAssembly, DirectoryInfo info)>(compiledPlugins.Length);
-            void Load(DirectoryInfo info)
-            {
-                var loadedAssembly = LoadAssembly(info);
-                if (loadedAssembly != null)
-                {
-                    TryLoadPlugin((loadedAssembly,info));
-                }
-            }
-            
-            if (parallel)
-            {
-                Parallel.ForEach(compiledPlugins, Load);
-            }
-            else
-            {
-                compiledPlugins.ForEach(Load);
-            }
-
-            return results;
-        }
-
-        private Assembly LoadAssembly(DirectoryInfo dir)
-        {
-            try
-            {
-                var directoryInfo = new DirectoryInfo(dir.FullName);
-                if (!directoryInfo.Exists)
-                {
-                    LogError($"Directory - {dir} not found.");
-                    return null;
-                }
-
-                var dll = directoryInfo.GetFiles($"{directoryInfo.Name}*.dll", SearchOption.TopDirectoryOnly)
-                    .FirstOrDefault();
-
-                if (dll == null)
-                {
-                    LogError($"Not found plugin dll in {dir.FullName}. (Dll should be like folder)");
-                    return null;
-                }
-
-                var pdbPath = dll.FullName.Replace(".dll", ".pdb");
-                var pdbExists = File.Exists(pdbPath);
-
-                var dllBytes = File.ReadAllBytes(dll.FullName);
-                var asm = pdbExists ? Assembly.Load(dllBytes, File.ReadAllBytes(pdbPath)) : Assembly.Load(dllBytes);
-
-                return asm;
-            }
-            catch (Exception e)
-            {
-                LogError($"{nameof(LoadAssembly)} -> {e}");
-                return null;
             }
         }
 
-
-        private Assembly CompilePlugin(DirectoryInfo info, CodeDomProvider provider, string[] dllFiles)
+        private void AddPluginInfoToDevTree()
         {
-            var csFiles = info.GetFiles("*.cs", SearchOption.AllDirectories).Select(x => x.FullName)
-                .ToArray();
+            var devTree = Plugins.FirstOrDefault(x => x.Name.Equals("DevTree"));
 
-            var parameters = new CompilerParameters
+            if (devTree != null)
             {
-                GenerateExecutable = false, GenerateInMemory = true,
-                CompilerOptions = "/optimize /unsafe"
-            };
-
-            parameters.ReferencedAssemblies.AddRange(dllFiles);
-            var csprojPath = Path.Combine(info.FullName, $"{info.Name}.csproj");
-
-            if (File.Exists(csprojPath))
-            {
-                var readAllLines = File.ReadAllLines(csprojPath);
-
-                var refer = readAllLines
-                    .WhereF(x =>
-                        x.TrimStart().StartsWith("<Reference Include=") && x.TrimEnd().EndsWith("/>"));
-
-                var refer2 = readAllLines.Where(x =>
-                    x.TrimStart().StartsWith("<Reference Include=") && x.TrimEnd().EndsWith("\">") &&
-                    x.Contains(","));
-
-                foreach (var r in refer)
+                try
                 {
-                    var arr = new int[2] {0, 0};
-                    var j = 0;
-
-                    for (var i = 0; i < r.Length; i++)
-                        if (r[i] == '"')
-                        {
-                            arr[j] = i;
-                            j++;
-                        }
-
-                    if (arr[1] != 0)
-                    {
-                        var dll = $"{r.Substring(arr[0] + 1, arr[1] - arr[0] - 1)}.dll";
-                        parameters.ReferencedAssemblies.Add(dll);
-                    }
+                    var fieldInfo = devTree.Plugin.GetType().GetField("Plugins");
+                    List<PluginWrapper> devTreePlugins() => Plugins;
+                    fieldInfo.SetValue(devTree.Plugin, (Func<List<PluginWrapper>>)devTreePlugins);
+                }
+                catch (Exception e)
+                {
+                    DebugWindow.LogError(e.ToString());
                 }
 
-                foreach (var r in refer2)
-                {
-                    var arr = new int[2] {0, 0};
-                    var j = 0;
-
-                    for (var i = 0; i < r.Length; i++)
-                    {
-                        if (r[i] == '"' && j == 0)
-                        {
-                            arr[0] = i;
-                            j++;
-                        }
-                        else if (r[i] == ',')
-                        {
-                            arr[1] = i;
-                            j++;
-                        }
-
-                        if (j == 2)
-                            break;
-                    }
-
-                    if (arr[1] != 0)
-                    {
-                        var dll = $"{r.Substring(arr[0] + 1, arr[1] - arr[0] - 1)}.dll";
-                        parameters.ReferencedAssemblies.Add(dll);
-                    }
-                }
             }
-
-            var libsFolder = Path.Combine(info.FullName, "libs");
-
-            if (Directory.Exists(libsFolder))
-            {
-                var libsDll = Directory.GetFiles(libsFolder, "*.dll");
-                parameters.ReferencedAssemblies.AddRange(libsDll);
-            }
-
-            //   parameters.TempFiles = new TempFileCollection($"{MainDir}\\{PluginsDirectory}\\Temp");
-            //  parameters.CoreAssemblyFileName = info.Name;
-            var result = provider.CompileAssemblyFromFile(parameters, csFiles);
-
-            if (result.Errors.HasErrors)
-            {
-                var AllErrors = "";
-
-                foreach (CompilerError compilerError in result.Errors)
-                {
-                    AllErrors += compilerError + Environment.NewLine;
-                    Logger.Log.Error($"{info.Name} -> {compilerError}");
-                }
-
-                File.WriteAllText(Path.Combine(info.FullName, "Errors.txt"), AllErrors);
-
-                // throw new Exception("Offsets file corrupted");
-            }
-            else
-            {
-                return result.CompiledAssembly;
-            }
-
-            return null;
-        }
-        
-        private List<(Assembly CompiledAssembly, DirectoryInfo directoryInfoinfo)> CompilePluginsFromSource(DirectoryInfo[] sourcePlugins)
-        {
-            using (CodeDomProvider provider =
-                new CSharpCodeProvider())
-            using (new PerformanceTimer("Compile and load source plugins"))
-            {
-                var _compilerSettings = provider.GetType()
-                    .GetField("_compilerSettings", BindingFlags.Instance | BindingFlags.NonPublic)
-                    .GetValue(provider);
-
-                var _compilerFullPath = _compilerSettings
-                    .GetType().GetField("_compilerFullPath", BindingFlags.Instance | BindingFlags.NonPublic);
-
-                _compilerFullPath.SetValue(_compilerSettings,
-                    ((string) _compilerFullPath.GetValue(_compilerSettings)).Replace(@"bin\roslyn\", @"roslyn\"));
-
-                var rootDirInfo = new DirectoryInfo(RootDirectory);
-
-                var dllFiles = rootDirInfo.GetFiles("*.dll", SearchOption.TopDirectoryOnly)
-                    .WhereF(x => !x.Name.Equals("cimgui.dll") && x.Name.Count(c => c == '-' || c == '_') != 5)
-                    .SelectF(x => x.FullName).ToArray();
-
-                var results = new List<(Assembly CompiledAssembly, DirectoryInfo info)>(sourcePlugins.Length);
-
-                if (parallelLoading)
-                {
-                    var innerLocker = new object();
-              
-
-                    Parallel.ForEach(sourcePlugins, info =>
-                    {
-                        using (new PerformanceTimer($"Compile and load source plugin: {info.Name}"))
-                        {
-                            /*lock (innerLocker)
-                            {
-                                results.Add((CompilePlugin(info,provider,dllFiles),info));
-                            }*/
-                            (Assembly ass, DirectoryInfo info) valueTuple = (CompilePlugin(info,provider,dllFiles),info);
-                            if (valueTuple.ass != null)
-                            {
-                                TryLoadPlugin(valueTuple);
-                            }
-                        }
-                    });
-                }
-                else
-                {
-                    foreach (var info in sourcePlugins)
-                    {
-                        /*results.Add((CompilePlugin(info,provider,dllFiles),info));*/
-                        (Assembly ass, DirectoryInfo info) valueTuple = (CompilePlugin(info,provider,dllFiles),info);
-                        if (valueTuple.ass != null)
-                        {
-                            TryLoadPlugin(valueTuple);
-                        }
-                    }
-                }
-
-                return results;
-            }
-        }
-
-        private void TryLoadPlugin((Assembly asm, DirectoryInfo directoryInfo) tuple)
-        {
-            try
-            {
-                var dir = tuple.asm.ManifestModule.ScopeName.Replace(".dll", "");
-
-                var fullPath = tuple.directoryInfo.FullName;
-
-                var types = tuple.asm.GetTypes();
-                if (types.Length == 0)
-                {
-                    LogError($"Not found any types in plugin {fullPath}");
-                    return;
-                }
-
-                var classesWithIPlugin = types.WhereF(type => typeof(IPlugin).IsAssignableFrom(type));
-                var settings = types.FirstOrDefaultF(type => typeof(ISettings).IsAssignableFrom(type));
-
-                if (settings == null)
-                {
-                    LogError("Not found setting class");
-                    return;
-                }
-
-
-                foreach (var type in classesWithIPlugin)
-                {
-                    if (type.IsAbstract) continue;
-
-                    if (Activator.CreateInstance(type) is IPlugin instance)
-                    {
-                        instance.DirectoryName = dir;
-                        instance.DirectoryFullName = fullPath;
-                        var pluginWrapper = new PluginWrapper(instance);
-                        pluginWrapper.SetApi(_gameController, _graphics, this);
-                        pluginWrapper.LoadSettings();
-                        pluginWrapper.Onload();
-                        var sw = PluginLoadTime[tuple.directoryInfo.FullName];
-                        sw.Stop();
-                        var elapsedTotalMilliseconds = sw.Elapsed.TotalMilliseconds;
-                        pluginWrapper.LoadedTime = elapsedTotalMilliseconds;
-                        DebugWindow.LogMsg($"{pluginWrapper.Name} loaded in {elapsedTotalMilliseconds} ms.",1,Color.Orange);
-                        lock (locker)
-                        {
-                            Plugins.Add(pluginWrapper);
-                        }
-                    }
-                }
-            }
-            catch (Exception e)
-            {
-                LogError($"Error when load plugin ({tuple.asm.ManifestModule.ScopeName}): {e})");
-            }
-        }
-        
-        
-        private void HotReloadDll(PluginWrapper wrapper, FileSystemEventArgs args)
-        {
-            try
-            {
-                var fullPath = args.FullPath;
-                if (!fullPath.EndsWith(".dll"))
-                {
-                    return;
-                }
-                var strings = fullPath.Split('\\');
-                var firstF = strings.LastF().Split('.').FirstF();
-                if (firstF != strings[strings.Length - 2])
-                {
-                    return;
-                }
-
-                //TODO DOUBLE LOAD
-                if (Math.Abs((DateTime.UtcNow-wrapper.LastWrite).TotalSeconds)<2)
-                    return;
-                wrapper.LastWrite = DateTime.UtcNow;
-                Core.MainRunner.Run(new Coroutine(() =>
-                {
-                    var fileInfo = new FileInfo(fullPath);
-                    var directoryInfo = fileInfo.Directory;
-                    var asm = LoadAssembly(directoryInfo);
-                    if (asm == null)
-                    {
-                        LogError($"{firstF} cant load assembly for reloading.");
-                        return;
-                    }
-
-                    var types = asm.GetTypes();
-                    if (types.Length == 0)
-                    {
-                        LogError($"Not found any types in plugin {fullPath}");
-                        return;
-                    }
-
-                    var classesWithIPlugin = types.WhereF(type => typeof(IPlugin).IsAssignableFrom(type));
-                    var settings = types.FirstOrDefaultF(type => typeof(ISettings).IsAssignableFrom(type));
-
-                    if (settings == null)
-                    {
-                        LogError($"Not found setting class in plugin {fullPath}");
-                        return;
-                    }
-
-                    foreach (var type in classesWithIPlugin)
-                    {
-                        if (type.IsAbstract) continue;
-
-                        if (Activator.CreateInstance(type) is IPlugin instance)
-                        {
-                            wrapper.ReloadPlugin(instance, _gameController, _graphics, this);
-                        }
-                    }
-                }, new WaitTime(1000), null, $"Reload: {firstF}", false){SyncModWork = true});
-
-
-
-            }
-            catch (Exception e)
-            {
-                DebugWindow.LogError($"HotRealod error: {e}");
-            }
-        }
-        //By default priority - Compiled 
-        private (DirectoryInfo[] CompiledDirectories, DirectoryInfo[] SourceDirectories) SearchPlugins()
-        {
-            var CompiledDirectories = new DirectoryInfo(Directories[CompiledPluginsDirectory]).GetDirectories();
-
-            var directoryInfos = new DirectoryInfo(Directories[SourcePluginsDirectory]).GetDirectories().Where(x => (x.Attributes & FileAttributes.Hidden) == 0).ToList();
-            for (var index = 0; index < directoryInfos.Count; index++)
-            {
-                var directoryInfo = directoryInfos[index];
-                if (directoryInfo.GetFiles().AnyF(x => x.Name.Equals("Errors.txt", StringComparison.Ordinal)))
-                {
-                     directoryInfos.RemoveAt(index);
-                     DebugWindow.LogMsg($"Skip {directoryInfo.Name} for loading from source because file Errors.txt exists.");
-                }
-            }
-
-            var SourceDirectories = directoryInfos
-                .ExceptBy(CompiledDirectories, info => info.Name)
-                .ToArray();
-            foreach (var info in CompiledDirectories)
-            {
-                PluginLoadTime[info.FullName] = Stopwatch.StartNew();
-            }
-
-            foreach (var info in SourceDirectories)
-            {
-                PluginLoadTime[info.FullName] = Stopwatch.StartNew();
-            }
-            return (CompiledDirectories, SourceDirectories);
         }
 
         public void CloseAllPlugins()

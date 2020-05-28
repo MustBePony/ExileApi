@@ -3,18 +3,24 @@ using System.IO;
 using System.Threading;
 using ExileCore.Shared.Interfaces;
 using ExileCore.Shared.Nodes;
+using ExileCore.Shared.PluginAutoUpdate;
 using Newtonsoft.Json;
 
 namespace ExileCore
 {
     public class SettingsContainer
     {
-        private const string SETTINGS_FILE_NAME = "config/settings.json";
-        private const string DEFAULT_PROFILE_NAME = "global";
-        private const string CFG_DIR = "config";
+
+        private string CFG_DIR => "config";
+        private string SETTINGS_FILE_NAME => Path.Combine(CFG_DIR, "settings.json");
+        private string PLUGIN_AUTO_UPDATE_SETTINGS_FILE => Path.Combine("Plugins", "updateSettings.json");
+        private string PLUGIN_AUTO_UPDATE_SETTINGS_FILE_DEFAULT => Path.Combine("Plugins", "updateSettings_default.json");
+
+        private string DEFAULT_PROFILE_NAME => "global";
         public static readonly JsonSerializerSettings jsonSettings;
         private string _currentProfileName = "";
-        public CoreSettings CoreSettings;
+        public CoreSettings CoreSettings { get; set; }
+        public PluginsUpdateSettings PluginsUpdateSettings { get; set; }
 
         static SettingsContainer()
         {
@@ -32,6 +38,7 @@ namespace ExileCore
             if (!Directory.Exists($"{CFG_DIR}\\{DEFAULT_PROFILE_NAME}")) Directory.CreateDirectory($"{CFG_DIR}\\{DEFAULT_PROFILE_NAME}");
 
             LoadCoreSettings();
+            LoadPluginAutoUpdateSettings();
         }
 
         private static ReaderWriterLockSlim rwLock { get; } = new ReaderWriterLockSlim();
@@ -54,8 +61,8 @@ namespace ExileCore
             {
                 if (!File.Exists(SETTINGS_FILE_NAME))
                 {
-                    var coreSettings = new CoreSettings();
-                    File.AppendAllText(SETTINGS_FILE_NAME, JsonConvert.SerializeObject(coreSettings, Formatting.Indented));
+                    CoreSettings = new CoreSettings();
+                    File.AppendAllText(SETTINGS_FILE_NAME, JsonConvert.SerializeObject(CoreSettings, Formatting.Indented));
                 }
                 else
                 {
@@ -64,6 +71,34 @@ namespace ExileCore
                 }
 
                 CurrentProfileName = CoreSettings.Profiles.Value;
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine(e);
+            }
+        }
+
+        public void LoadPluginAutoUpdateSettings()
+        {
+            try
+            {
+                if (!File.Exists(PLUGIN_AUTO_UPDATE_SETTINGS_FILE))
+                {
+                    PluginsUpdateSettings = new PluginsUpdateSettings();
+                    if (File.Exists(PLUGIN_AUTO_UPDATE_SETTINGS_FILE_DEFAULT))
+                    {
+                        var readAllText = File.ReadAllText(PLUGIN_AUTO_UPDATE_SETTINGS_FILE_DEFAULT);
+                        PluginsUpdateSettings = JsonConvert.DeserializeObject<PluginsUpdateSettings>(readAllText);
+                    }
+                    File.AppendAllText(PLUGIN_AUTO_UPDATE_SETTINGS_FILE, JsonConvert.SerializeObject(PluginsUpdateSettings, Formatting.Indented));
+                }
+                else
+                {
+                    var readAllText = File.ReadAllText(PLUGIN_AUTO_UPDATE_SETTINGS_FILE);
+                    PluginsUpdateSettings = JsonConvert.DeserializeObject<PluginsUpdateSettings>(readAllText);
+                }
+                PluginsUpdateSettings.Username = PluginsUpdateSettings.Username ?? new TextNode("");
+                PluginsUpdateSettings.Password = PluginsUpdateSettings.Password ?? new TextNode("");
             }
             catch (Exception e)
             {
@@ -80,6 +115,21 @@ namespace ExileCore
                 var info = new FileInfo(SETTINGS_FILE_NAME);
                 if (info.Length > 1) File.Copy(SETTINGS_FILE_NAME, $"{CFG_DIR}\\dumpSettings.json", true);
                 File.WriteAllText(SETTINGS_FILE_NAME, serializeObject);
+                rwLock.ExitWriteLock();
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine(e);
+            }
+        }
+
+        public void SavePluginAutoUpdateSettings()
+        {
+            try
+            {
+                rwLock.EnterWriteLock();
+                var serializeObject = JsonConvert.SerializeObject(PluginsUpdateSettings, Formatting.Indented);
+                File.WriteAllText(PLUGIN_AUTO_UPDATE_SETTINGS_FILE, serializeObject);
                 rwLock.ExitWriteLock();
             }
             catch (Exception e)

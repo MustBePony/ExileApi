@@ -13,6 +13,7 @@ using ExileCore.Shared;
 using ExileCore.Shared.Enums;
 using ExileCore.Shared.Helpers;
 using ExileCore.Shared.Nodes;
+using ExileCore.Shared.VersionChecker;
 using ImGuiNET;
 using JM.LinqFaster;
 using Serilog;
@@ -77,6 +78,8 @@ namespace ExileCore
                     WinApi.SetTransparent(f.Handle);
                 };
 
+                var versionChecker = new VersionChecker();
+
                 _coreDebugInformation = new DebugInformation("Core");
                 _menuDebugInformation = new DebugInformation("Menu+Debug");
                 _allPluginsDebugInformation = new DebugInformation("All plugins");
@@ -101,7 +104,7 @@ namespace ExileCore
 
                 if (Environment.OSVersion.Version.Major == 6 && Environment.OSVersion.Version.Minor == 1)
                 {
-                    Logger.Information($"SoundController init skipped because win7 issue.");
+                    DebugWindow.LogMsg($"SoundController init skipped because win7 issue.");
                 }
                 else
                 {
@@ -117,7 +120,7 @@ namespace ExileCore
                 // Task.Run(ParallelCoroutineRunner);
                 var th = new Thread(ParallelCoroutineManualThread) {Name = "Parallel Coroutine", IsBackground = true};
                 th.Start();
-                _mainMenu = new MenuWindow(this, _settings, _dx11.ImGuiRender.fonts);
+                _mainMenu = new MenuWindow(this, _settings, _dx11.ImGuiRender.fonts, ref versionChecker);
                 _debugWindow = new DebugWindow(Graphics, _coreSettings);
 
                 MultiThreadManager = new MultiThreadManager(_coreSettings.Threads);
@@ -159,7 +162,7 @@ namespace ExileCore
                 CoroutineRunnerParallel.Run(coroutine);
                 NextCoroutineTime = Time.TotalMilliseconds;
                 NextRender = Time.TotalMilliseconds;
-                if (pluginManager.Plugins.Count == 0)
+                if (pluginManager?.Plugins.Count == 0)
                 {
                     _coreSettings.Enable.Value = true;
                 }
@@ -168,7 +171,7 @@ namespace ExileCore
             }
             catch (Exception e)
             {
-                Logger.Error($"Core constructor -> {e}");
+                DebugWindow.LogMsg($"Core constructor -> {e}");
                 MessageBox.Show($"Error in Core constructor -> {e}", "Oops... Program fail to launch");
             }
         }
@@ -326,7 +329,7 @@ namespace ExileCore
 
                     try
                     {
-                        _mainMenu.Render(GameController);
+                        _mainMenu.Render(GameController, pluginManager.Plugins);
                     }
                     catch (Exception e)
                     {

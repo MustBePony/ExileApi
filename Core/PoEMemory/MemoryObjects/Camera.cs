@@ -7,8 +7,6 @@ namespace ExileCore.PoEMemory.MemoryObjects
 {
     public class Camera : RemoteMemoryObject
     {
-        private static Vector2 oldplayerCord;
-        private readonly CameraOffsets? _cameraOffsets;
         private readonly CachedValue<CameraOffsets> _cachedValue;
 
         public Camera()
@@ -69,7 +67,7 @@ namespace ExileCore.PoEMemory.MemoryObjects
             }
             catch (Exception ex)
             {
-                Core.Logger.Error($"Camera WorldToScreen {ex}");
+                DebugWindow.LogError($"Camera WorldToScreen {ex}");
             }
 
             return Vector2.Zero;

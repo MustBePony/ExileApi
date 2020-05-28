@@ -1,4 +1,4 @@
-﻿using System.Runtime.InteropServices;
+using System.Runtime.InteropServices;
 using GameOffsets.Native;
 
 namespace GameOffsets
@@ -21,11 +21,7 @@ namespace GameOffsets
         // That one works for all kind of skills.
         // [FieldOffset(0x128)] public Vector2 SkillDestination;
         [FieldOffset(0x510)] public NativePtrArray ActorSkillsArray;
-
-        // Broken Offset, remove comment on fixup.
-        // [FieldOffset(0x418)] public NativePtrArray ActorVaalSkills;
-        // [FieldOffset(0x438)] public NativePtrArray HasMinionArray;
-
-        [FieldOffset(0x470)] public NativePtrArray DeployedObjectArray;
+        [FieldOffset(0x540)] public NativePtrArray ActorVaalSkills;
+        [FieldOffset(0x578)] public NativePtrArray DeployedObjectArray;
     }
 }

@@ -22,7 +22,7 @@ namespace ExileCore
             if (string.IsNullOrWhiteSpace(Name)) Name = InternalName;
             Drawers = new List<ISettingsHolder>();
         }
-
+        public static IDebugObjects DebugObjects { get; } = new DebugObjects();
         public List<ISettingsHolder> Drawers { get; }
         public GameController GameController { get; private set; }
         public Graphics Graphics { get; private set; }
